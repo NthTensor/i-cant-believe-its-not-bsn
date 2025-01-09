@@ -116,7 +116,7 @@ impl Default for Fragment {
 // -----------------------------------------------------------------------------
 // Dynamically typed bundles
 
-/// Bundles are not not dyn-compatable, which means they cannot be boxed. This
+/// Bundles are not dyn-compatable, which means they cannot be boxed. This
 /// trait provides a dyn-compatable alternative.
 pub trait ErasedBundle {
     /// Inserts a bundle on the specified entity, and removes components present
