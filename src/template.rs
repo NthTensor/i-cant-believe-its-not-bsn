@@ -22,7 +22,7 @@ pub struct Fragment {
 /// have either a unique name, or no specific name.
 pub type Template = Vec<Fragment>;
 
-pub trait BuildFragments {
+pub trait BuildTemplate {
     /// Builds the template on a node. The fragments in the template become the
     /// children of the node.
     fn build(
@@ -33,44 +33,42 @@ pub trait BuildFragments {
     ) -> HashMap<Anchor, Entity>;
 }
 
-impl<T> BuildFragments for T
-where
-    T: IntoIterator<Item = Fragment>,
-{
+impl BuildTemplate for Template {
     fn build(
         self,
         entity_id: Entity,
         world: &mut World,
         mut current_anchors: HashMap<Anchor, Entity>,
     ) -> HashMap<Anchor, Entity> {
+        // Build the fragments
+        let mut children = Vec::with_capacity(self.len());
+        let mut new_anchors = HashMap::with_capacity(self.len());
         let mut i = 0;
-        let new_anchors: Vec<(Anchor, Entity)> = self
-            .into_iter()
-            .map(|fragment| {
-                // Compute the anchor for this fragment, using it's name if supplied
-                // or an auto-incrementing counter if not.
-                let anchor = match fragment.name {
-                    Some(ref name) => Anchor::Named(name.clone()),
-                    None => {
-                        let anchor = Anchor::Auto(i);
-                        i += 1;
-                        anchor
-                    }
-                };
+        for fragment in self {
+            // Compute the anchor for this fragment, using it's name if supplied
+            // or an auto-incrementing counter if not.
+            let anchor = match fragment.name {
+                Some(ref name) => Anchor::Named(name.clone()),
+                None => {
+                    let anchor = Anchor::Auto(i);
+                    i += 1;
+                    anchor
+                }
+            };
 
-                // Find the existing child entity based on the anchor, or spawn a
-                // new one.
-                let entity_id = current_anchors
-                    .remove(&anchor)
-                    .unwrap_or_else(|| world.spawn_empty().id());
+            // Find the existing child entity based on the anchor, or spawn a
+            // new one.
+            let entity_id = current_anchors
+                .remove(&anchor)
+                .unwrap_or_else(|| world.spawn_empty().id());
 
-                // Build the child
-                fragment.build(entity_id, world);
+            // Build the child
+            fragment.build(entity_id, world);
 
-                // Return the anchor and child id
-                (anchor, entity_id)
-            })
-            .collect();
+            // Return the receipts
+            children.push(entity_id);
+            new_anchors.insert(anchor, entity_id);
+        }
 
         // Clear any remaining orphans
         for orphan_id in current_anchors.into_values() {
@@ -81,11 +79,10 @@ where
         let mut entity = world.entity_mut(entity_id);
 
         // Position the children beneath the entity
-        let children: Vec<_> = new_anchors.iter().map(|(_, child_id)| *child_id).collect();
         entity.replace_children(&children);
 
         // Return the new set of anchors
-        new_anchors.into_iter().collect()
+        new_anchors
     }
 }
 
@@ -245,9 +242,7 @@ pub trait TemplateEntityCommandsExt {
     ///
     /// To build a fragment directly on the entity, see
     /// [`build`](TemplateEntityCommandsExt::build).
-    fn build_children<T>(&mut self, template: T) -> &mut Self
-    where
-        T: IntoIterator<Item = Fragment> + Send + Sync + 'static;
+    fn build_children(&mut self, template: Template) -> &mut Self;
 }
 
 impl<'a> TemplateEntityCommandsExt for EntityCommands<'a> {
@@ -265,10 +260,7 @@ impl<'a> TemplateEntityCommandsExt for EntityCommands<'a> {
         }
     }
 
-    fn build_children<T>(&mut self, children: T) -> &mut Self
-    where
-        T: IntoIterator<Item = Fragment> + Send + Sync + 'static,
-    {
+    fn build_children(&mut self, children: Template) -> &mut Self {
         self.queue(|entity_id: Entity, world: &mut World| {
             // Access the receipt for the parent.
             let receipt = world
@@ -392,8 +384,7 @@ impl<'a> TemplateEntityCommandsExt for EntityCommands<'a> {
 /// // A single component.
 /// ComponentA;
 ///
-/// // An if statement that switches between different values for the same
-/// component.
+/// // An if statement that switches between different values for the same component.
 /// if foo { EnumComponent::A } else { EnumComponent::B };
 ///
 /// // An if statement that switches between different bundle types.
@@ -615,9 +606,19 @@ macro_rules! push_fragment {
 }
 
 /// This macro is just a shorthand for creating a [`BoxedBundle`] from a bundle.
+///
+/// # Example
+///
+/// ```
+/// # use i_cant_believe_its_not_bsn::*;
+/// # use bevy::prelude::*;
+/// let empty_bundle = b!();
+/// let single_bundle = b!(Transform::default());
+/// let multi_bundle = b!(Transform::default(), Visibility::Visible);
+/// ```
 #[macro_export]
 macro_rules! b {
-    ($expr:expr) => {
-        BoxedBundle::from($expr)
+    ($( $item:expr ),* ) => {
+        BoxedBundle::from( ( $( $item ),* ) )
     };
 }

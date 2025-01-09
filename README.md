@@ -24,9 +24,4 @@ Arbitrary data can be passed into the macro using normal rust blocks.
 The macro returns portable `Template` values, which can be spliced into other templates using `@{ ... }`.
 
 Not only is the macro declarative and composable, it also supports basic incrementalization (doing partial updates to the ecs rather than rebuilding from scratch).
-Building the same macro multiple times with
-```rust
-commands.entity(entity).build(template);
-commands.entity(entity).build_children(template)
-```
-does only the work necessary to bring the `entity` into alignment with the template.
+Building the same macro multiple times with does only the work necessary to bring the `entity` into alignment with the template.
