@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::mem;
 
-use bevy_ecs::{component::ComponentId, prelude::*};
+use bevy_ecs::{
+    component::ComponentId, prelude::*, system::IntoObserverSystem, world::DeferredWorld,
+};
 use bevy_hierarchy::prelude::*;
 
 // -----------------------------------------------------------------------------
@@ -40,49 +43,55 @@ impl BuildTemplate for Template {
         world: &mut World,
         mut current_anchors: HashMap<Anchor, Entity>,
     ) -> HashMap<Anchor, Entity> {
-        // Build the fragments
-        let mut children = Vec::with_capacity(self.len());
-        let mut new_anchors = HashMap::with_capacity(self.len());
+        // Get or create an entity for each fragment.
         let mut i = 0;
-        for fragment in self {
-            // Compute the anchor for this fragment, using it's name if supplied
-            // or an auto-incrementing counter if not.
-            let anchor = match fragment.name {
-                Some(ref name) => Anchor::Named(name.clone()),
-                None => {
-                    let anchor = Anchor::Auto(i);
-                    i += 1;
-                    anchor
-                }
-            };
+        let fragments: Vec<_> = self
+            .into_iter()
+            .map(|fragment| {
+                // Compute the anchor for this fragment, using it's name if supplied
+                // or an auto-incrementing counter if not.
+                let anchor = match fragment.name {
+                    Some(ref name) => Anchor::Named(name.clone()),
+                    None => {
+                        let anchor = Anchor::Auto(i);
+                        i += 1;
+                        anchor
+                    }
+                };
 
-            // Find the existing child entity based on the anchor, or spawn a
-            // new one.
-            let entity_id = current_anchors
-                .remove(&anchor)
-                .unwrap_or_else(|| world.spawn_empty().id());
+                // Find the existing child entity based on the anchor, or spawn a
+                // new one.
+                let entity_id = current_anchors
+                    .remove(&anchor)
+                    .unwrap_or_else(|| world.spawn_empty().id());
 
-            // Build the child
-            fragment.build(entity_id, world);
+                // Store the fragment, it's anchor, and it's entity id.
+                (fragment, anchor, entity_id)
+            })
+            .collect();
 
-            // Return the receipts
-            children.push(entity_id);
-            new_anchors.insert(anchor, entity_id);
-        }
-
-        // Clear any remaining orphans
+        // Clear any remaining orphans from the previous template. We do this
+        // first (before deparenting) so that hooks still see the parent when
+        // they run.
         for orphan_id in current_anchors.into_values() {
             world.entity_mut(orphan_id).despawn_recursive();
         }
 
-        // Access the current entity directly
+        // Position the entities as children.
         let mut entity = world.entity_mut(entity_id);
+        let child_entities: Vec<_> = fragments.iter().map(|(_, _, entity)| *entity).collect();
+        entity.replace_children(&child_entities);
 
-        // Position the children beneath the entity
-        entity.replace_children(&children);
-
-        // Return the new set of anchors
-        new_anchors
+        // Build the children and produce the receipts. It's important that this
+        // happens *after* the entities are positioned as children to make hooks
+        // work correctly.
+        fragments
+            .into_iter()
+            .map(|(fragment, anchor, entity_id)| {
+                fragment.build(entity_id, world);
+                (anchor, entity_id)
+            })
+            .collect()
     }
 }
 
@@ -129,7 +138,10 @@ pub trait ErasedBundle {
     ) -> HashSet<ComponentId>;
 }
 
-impl<B: Bundle> ErasedBundle for B {
+impl<B> ErasedBundle for B
+where
+    B: Bundle,
+{
     fn build(
         self: Box<Self>,
         entity_id: Entity,
@@ -163,12 +175,88 @@ pub struct BoxedBundle {
     inner: Box<dyn ErasedBundle + Send + 'static>,
 }
 
-impl<B: Bundle> From<B> for BoxedBundle {
+impl<B> From<B> for BoxedBundle
+where
+    B: Bundle,
+{
     fn from(bundle: B) -> BoxedBundle {
         BoxedBundle {
             inner: Box::new(bundle),
         }
     }
+}
+
+// -----------------------------------------------------------------------------
+// Callbacks and observers
+
+/// This is a helper for adding observers to a `template` macro.
+///
+/// ```
+/// # use i_cant_believe_its_not_bsn::*;
+/// # use bevy::prelude::*;
+/// template!{
+///     Name::new("MyEntity") => [
+///         on(|trigger: Trigger<Pointer<Click>>| {
+///             // Do something when "MyEntity" is clicked.
+///         });
+///         on(|trigger: Trigger<Pointer<Drag>>| {
+///             // Do something when "MyEntity" is dragged.
+///         });
+///     ];
+/// };
+/// ```
+pub fn on<E, B, M, I>(system: I) -> Callback
+where
+    E: Event,
+    B: Bundle,
+    I: IntoObserverSystem<E, B, M>,
+{
+    Callback::new(system)
+}
+
+#[derive(Component)]
+#[component(on_insert = insert_callback)]
+#[component(on_remove = remove_callback)]
+pub struct Callback {
+    observer: Option<Observer>,
+}
+
+impl Callback {
+    pub fn new<E, B, M, I>(system: I) -> Callback
+    where
+        E: Event,
+        B: Bundle,
+        I: IntoObserverSystem<E, B, M>,
+    {
+        Callback {
+            observer: Some(Observer::new(system)),
+        }
+    }
+}
+
+impl From<Observer> for Callback {
+    fn from(observer: Observer) -> Callback {
+        Callback {
+            observer: Some(observer),
+        }
+    }
+}
+
+fn insert_callback(mut world: DeferredWorld, entity_id: Entity, _component: ComponentId) {
+    let mut callback = world.get_mut::<Callback>(entity_id).unwrap();
+    let Some(mut observer) = mem::take(&mut callback.observer) else {
+        return;
+    };
+    if let Some(parent_id) = world.get::<Parent>(entity_id).map(|parent| parent.get()) {
+        observer.watch_entity(parent_id);
+    }
+    let mut commands = world.commands();
+    commands.entity(entity_id).insert(observer);
+}
+
+fn remove_callback(mut world: DeferredWorld, entity_id: Entity, _component: ComponentId) {
+    let mut commands = world.commands();
+    commands.entity(entity_id).remove::<Observer>();
 }
 
 // -----------------------------------------------------------------------------
